@@ -1,6 +1,6 @@
 // Vercel serverless function: /api/ask
-// Receives a JSON body and forwards it to the Claude API with the secret API key
-// added server-side (never exposed to the browser).
+// Proxies requests to Groq using their OpenAI-compatible API.
+// Returns responses in Anthropic-shape so the frontend doesn't need changes.
 
 export const config = { runtime: 'edge' };
 
@@ -12,51 +12,61 @@ export default async function handler(req) {
     });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY env var not set' }), {
+    return new Response(JSON.stringify({ error: 'GROQ_API_KEY env var not set' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     });
   }
 
   let body;
-  try {
-    body = await req.json();
-  } catch {
+  try { body = await req.json(); }
+  catch {
     return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
+      status: 400, headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  // Defaults — caller can override model, max_tokens, etc. by including them in the body.
+  // Translate Anthropic-style {system, messages} to OpenAI-style messages
+  const messages = [];
+  if (body.system) messages.push({ role: 'system', content: body.system });
+  for (const m of body.messages || []) {
+    messages.push({ role: m.role, content: m.content });
+  }
+
   const payload = {
-    model: body.model || 'claude-haiku-4-5-20251001',
+    model: body.model || 'llama-3.3-70b-versatile',
+    messages,
     max_tokens: body.max_tokens || 1000,
-    system: body.system || '',
-    messages: body.messages || []
+    temperature: 0.3,
+    response_format: { type: 'json_object' }
   };
 
   try {
-    const upstream = await fetch('https://api.anthropic.com/v1/messages', {
+    const upstream = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
+        'Authorization': `Bearer ${apiKey}`
       },
       body: JSON.stringify(payload)
     });
-    const text = await upstream.text();
-    return new Response(text, {
-      status: upstream.status,
-      headers: { 'Content-Type': 'application/json' }
+    const data = await upstream.json();
+    if (!upstream.ok) {
+      return new Response(JSON.stringify(data), {
+        status: upstream.status,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    // Repackage as Anthropic-shape so frontend code keeps working
+    const text = data.choices?.[0]?.message?.content || '';
+    return new Response(JSON.stringify({ content: [{ type: 'text', text }] }), {
+      status: 200, headers: { 'Content-Type': 'application/json' }
     });
   } catch (e) {
     return new Response(JSON.stringify({ error: e.message || 'Upstream fetch failed' }), {
-      status: 502,
-      headers: { 'Content-Type': 'application/json' }
+      status: 502, headers: { 'Content-Type': 'application/json' }
     });
   }
 }
