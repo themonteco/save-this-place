@@ -9,7 +9,7 @@ import {
   signUp as sbSignUp, signIn as sbSignIn, signOut as sbSignOut,
   getCurrentUser, onAuthChange,
   fetchPlaces, createPlace, updatePlace, deletePlace as sbDeletePlace,
-  callAsk
+  callAsk, reverseGeocode
 } from "./lib/supabase.js";
 
 const CATEGORIES = {
@@ -26,6 +26,62 @@ const CATEGORIES = {
   default: { label: "Places", color: "#B5832A", soft: "#F1E3BF", emoji: "\u{1F4CD}", keywords: [] }
 };
 const CATEGORY_ORDER = ["nature","camping","food","city","shop","default"];
+
+const SUBTYPES = {
+  nature: [
+    { key: "mountain", label: "Mountain", emoji: "\u{1F3D4}\u{FE0F}", keywords: ["mountain","peak","summit","mt.","mt "] },
+    { key: "waterfall", label: "Waterfall", emoji: "\u{1F4A7}", keywords: ["waterfall","falls"] },
+    { key: "lake", label: "Lake", emoji: "\u{1F305}", keywords: ["lake","pond","reservoir"] },
+    { key: "river", label: "River", emoji: "\u{1F30A}", keywords: ["river","creek","stream"] },
+    { key: "beach", label: "Beach", emoji: "\u{1F3D6}\u{FE0F}", keywords: ["beach","shore","coast"] },
+    { key: "forest", label: "Forest", emoji: "\u{1F332}", keywords: ["forest","woods","grove"] },
+    { key: "trail", label: "Trail", emoji: "\u{1F97E}", keywords: ["trail","hike","trailhead","path"] },
+    { key: "park", label: "Park", emoji: "\u{1F333}", keywords: ["park","preserve"] }
+  ],
+  food: [
+    { key: "restaurant", label: "Restaurant", emoji: "\u{1F37D}\u{FE0F}", keywords: ["restaurant","eatery","diner"] },
+    { key: "cafe", label: "Cafe", emoji: "\u{2615}", keywords: ["cafe","coffee","espresso"] },
+    { key: "bar", label: "Bar", emoji: "\u{1F37A}", keywords: ["bar","pub","brewery","tavern","cocktail","wine"] },
+    { key: "bakery", label: "Bakery", emoji: "\u{1F950}", keywords: ["bakery","pastry","bread"] },
+    { key: "icecream", label: "Ice Cream", emoji: "\u{1F366}", keywords: ["ice cream","gelato","sorbet"] },
+    { key: "pizza", label: "Pizza", emoji: "\u{1F355}", keywords: ["pizza","pizzeria"] }
+  ],
+  camping: [
+    { key: "campsite", label: "Campsite", emoji: "\u{26FA}", keywords: ["camp","campsite","campground"] },
+    { key: "cabin", label: "Cabin", emoji: "\u{1FAB5}", keywords: ["cabin","lodge"] },
+    { key: "hotspring", label: "Hot Spring", emoji: "\u{2668}\u{FE0F}", keywords: ["hot spring","spring"] },
+    { key: "rv", label: "RV", emoji: "\u{1F69A}", keywords: ["rv","boondock"] }
+  ],
+  shop: [
+    { key: "boutique", label: "Boutique", emoji: "\u{1F457}", keywords: ["boutique","clothing","fashion"] },
+    { key: "thrift", label: "Thrift", emoji: "\u{1F9F5}", keywords: ["thrift","vintage","consignment"] },
+    { key: "bookstore", label: "Bookstore", emoji: "\u{1F4DA}", keywords: ["bookstore","books"] },
+    { key: "records", label: "Records", emoji: "\u{1F4BF}", keywords: ["record","vinyl","music store"] },
+    { key: "market", label: "Market", emoji: "\u{1F6D2}", keywords: ["market","grocery","farmer"] }
+  ],
+  city: [
+    { key: "stadium", label: "Stadium", emoji: "\u{1F3DF}\u{FE0F}", keywords: ["stadium","arena","ballpark"] },
+    { key: "venue", label: "Venue", emoji: "\u{1F3A4}", keywords: ["venue","club","theater","concert"] },
+    { key: "museum", label: "Museum", emoji: "\u{1F3DB}\u{FE0F}", keywords: ["museum","gallery","exhibit"] },
+    { key: "plaza", label: "Plaza", emoji: "\u{26F2}", keywords: ["plaza","square","fountain"] },
+    { key: "viewpoint", label: "Viewpoint", emoji: "\u{1F306}", keywords: ["rooftop","viewpoint","overlook"] }
+  ]
+};
+
+function detectSubtype(text, categoryKey) {
+  const lower = (text || "").toLowerCase();
+  const subs = SUBTYPES[categoryKey] || [];
+  for (const sub of subs) {
+    if (sub.keywords.some((kw) => lower.includes(kw))) return sub.key;
+  }
+  return null;
+}
+
+function getSubtypeMeta(categoryKey, subtypeKey) {
+  if (!subtypeKey) return null;
+  const subs = SUBTYPES[categoryKey] || [];
+  return subs.find((s) => s.key === subtypeKey) || null;
+}
 
 const DEMO_LOCATIONS = [
   { lat: 34.4480, lng: -119.2429, label: "Ojai, CA" },
@@ -413,15 +469,25 @@ export default function App() {
 
   const commitSave = async (name, notes, categoryKey, loc, photo) => {
     try {
+      const finalCategory = categoryKey || categorize(name);
+      const subtype = detectSubtype(`${name} ${notes || ''}`, finalCategory);
+      // Reverse geocode in parallel with insert prep; don't block save if it fails
+      const regionPromise = reverseGeocode(loc.lat, loc.lng).catch(() => null);
+      const region = await Promise.race([
+        regionPromise,
+        new Promise((resolve) => setTimeout(() => resolve(null), 3000))
+      ]);
       const newPlace = await createPlace({
         name: name.trim(),
         notes: (notes || "").trim(),
         lat: loc.lat,
         lng: loc.lng,
         accuracy: loc.accuracy,
-        category: categoryKey || categorize(name),
+        category: finalCategory,
         categoryOverride: null,
-        photo: photo || null
+        photo: photo || null,
+        region,
+        subtype
       });
       setPlaces((prev) => [newPlace, ...prev]);
       setScreen("saved");
@@ -680,13 +746,34 @@ ${JSON.stringify(ctx, null, 2)}`;
   const filteredPlaces = useMemo(() => {
     if (!searchQuery.trim()) return places;
     const q = searchQuery.toLowerCase();
-    return places.filter((p) => p.name.toLowerCase().includes(q) || (p.notes || "").toLowerCase().includes(q));
+    return places.filter((p) =>
+      p.name.toLowerCase().includes(q) ||
+      (p.notes || "").toLowerCase().includes(q) ||
+      (p.region || "").toLowerCase().includes(q)
+    );
   }, [places, searchQuery]);
 
-  const grouped = useMemo(() => {
-    const g = {};
-    for (const p of filteredPlaces) { const k = getCategoryKey(p); (g[k] = g[k] || []).push(p); }
-    return CATEGORY_ORDER.filter((k) => g[k]).map((k) => [k, g[k]]);
+  const groupedByRegion = useMemo(() => {
+    const byRegion = {};
+    for (const p of filteredPlaces) {
+      const r = p.region || "Other places";
+      (byRegion[r] = byRegion[r] || []).push(p);
+    }
+    const regionNames = Object.keys(byRegion).sort((a, b) => {
+      if (a === "Other places") return 1;
+      if (b === "Other places") return -1;
+      return a.localeCompare(b);
+    });
+    return regionNames.map((regionName) => {
+      const placesInRegion = byRegion[regionName];
+      const byCat = {};
+      for (const p of placesInRegion) {
+        const k = getCategoryKey(p);
+        (byCat[k] = byCat[k] || []).push(p);
+      }
+      const cats = CATEGORY_ORDER.filter((k) => byCat[k]).map((k) => [k, byCat[k]]);
+      return [regionName, cats, placesInRegion.length];
+    });
   }, [filteredPlaces]);
 
   const showTabBar = ["home", "list", "ask"].includes(screen);
@@ -1014,46 +1101,60 @@ ${JSON.stringify(ctx, null, 2)}`;
                     <Mountain size={42} strokeWidth={1.6} className="mx-auto mb-3 opacity-50" />
                     <p className="text-[15px] font-medium">No entries yet</p>
                   </div>
-                ) : grouped.length === 0 ? (
+                ) : groupedByRegion.length === 0 ? (
                   <div className="text-center py-12" style={{ color: "#7A6B58" }}>
                     <Search size={32} strokeWidth={1.6} className="mx-auto mb-3 opacity-50" />
                     <p className="text-[14px]">Nothing matches "{searchQuery}"</p>
                   </div>
                 ) : (
-                  grouped.map(([catKey, list]) => {
-                    const cat = CATEGORIES[catKey];
-                    return (
-                      <div key={catKey} className="mb-5">
-                        <div className="flex items-center gap-2 mb-2 px-1">
-                          <span className="px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1.5 uppercase tracking-wider" style={{ background: cat.soft, color: cat.color }}>
-                            <span>{cat.emoji}</span>{cat.label}
-                          </span>
-                          <span className="text-[11px] font-semibold" style={{ color: "#7A6B58" }}>{list.length}</span>
-                        </div>
-                        <div className="space-y-2">
-                          {list.map((place) => (
-                            <div key={place.id} className="rounded-2xl flex items-center gap-1 relative overflow-hidden" style={{ background: "#FAF3E3", boxShadow: "0 2px 10px -6px rgba(92, 69, 48, 0.25), inset 0 0 0 1px rgba(92, 69, 48, 0.06)" }}>
-                              <motion.button onClick={() => setSelectedPlace(place)} whileTap={{ scale: 0.99 }} className="flex-1 text-left p-2.5 flex items-center gap-3 min-w-0">
-                                {place.photo ? (
-                                  <div className="w-12 h-12 rounded-xl overflow-hidden flex-shrink-0" style={{ boxShadow: `inset 0 0 0 1.5px ${cat.color}` }}><img src={place.photo} alt="" className="w-full h-full object-cover" /></div>
-                                ) : (
-                                  <div className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 text-[20px]" style={{ background: cat.soft, boxShadow: `inset 0 0 0 1.5px ${cat.color}` }}>{cat.emoji}</div>
-                                )}
-                                <div className="flex-1 min-w-0 py-0.5">
-                                  <p className="text-[15px] font-semibold truncate" style={{ color: "#2A2218" }}>{place.name}</p>
-                                  {place.notes && (<p className="text-[12px] truncate mt-0.5" style={{ color: "#5C4530" }}>{place.notes}</p>)}
-                                  <p className="text-[10px] mt-0.5 font-mono" style={{ color: "#7A6B58" }}>{timeAgo(place.createdAt)} · {place.lat.toFixed(3)}, {place.lng.toFixed(3)}</p>
-                                </div>
-                              </motion.button>
-                              <motion.button onClick={(e) => { e.stopPropagation(); sharePlace(place); }} whileTap={{ scale: 0.9 }} className="w-10 h-10 mr-2 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: "rgba(232, 99, 45, 0.12)", color: "#C44818" }} aria-label="Share place">
-                                <Send size={14} strokeWidth={2.4} />
-                              </motion.button>
-                            </div>
-                          ))}
-                        </div>
+                  groupedByRegion.map(([regionName, cats, totalCount]) => (
+                    <div key={regionName} className="mb-6">
+                      <div className="flex items-baseline gap-2 mb-3 px-1 pb-1.5" style={{ borderBottom: "1px solid rgba(92, 69, 48, 0.18)" }}>
+                        <span style={{ fontSize: 17, fontWeight: 700, color: "#2A2218", letterSpacing: "-0.01em" }}>{regionName}</span>
+                        <span className="text-[11px] font-semibold" style={{ color: "#7A6B58" }}>{totalCount}</span>
                       </div>
-                    );
-                  })
+                      {cats.map(([catKey, list]) => {
+                        const cat = CATEGORIES[catKey];
+                        return (
+                          <div key={catKey} className="mb-4">
+                            <div className="flex items-center gap-2 mb-2 px-1">
+                              <span className="px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1.5 uppercase tracking-wider" style={{ background: cat.soft, color: cat.color }}>
+                                <span>{cat.emoji}</span>{cat.label}
+                              </span>
+                              <span className="text-[11px] font-semibold" style={{ color: "#7A6B58" }}>{list.length}</span>
+                            </div>
+                            <div className="space-y-2">
+                              {list.map((place) => {
+                                const subMeta = getSubtypeMeta(getCategoryKey(place), place.subtype);
+                                return (
+                                  <div key={place.id} className="rounded-2xl flex items-center gap-1 relative overflow-hidden" style={{ background: "#FAF3E3", boxShadow: "0 2px 10px -6px rgba(92, 69, 48, 0.25), inset 0 0 0 1px rgba(92, 69, 48, 0.06)" }}>
+                                    <motion.button onClick={() => setSelectedPlace(place)} whileTap={{ scale: 0.99 }} className="flex-1 text-left p-2.5 flex items-center gap-3 min-w-0">
+                                      {place.photo ? (
+                                        <div className="w-12 h-12 rounded-xl overflow-hidden flex-shrink-0" style={{ boxShadow: `inset 0 0 0 1.5px ${cat.color}` }}><img src={place.photo} alt="" className="w-full h-full object-cover" /></div>
+                                      ) : (
+                                        <div className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 text-[20px]" style={{ background: cat.soft, boxShadow: `inset 0 0 0 1.5px ${cat.color}` }}>{subMeta ? subMeta.emoji : cat.emoji}</div>
+                                      )}
+                                      <div className="flex-1 min-w-0 py-0.5">
+                                        <div className="flex items-center gap-1.5">
+                                          <p className="text-[15px] font-semibold truncate" style={{ color: "#2A2218" }}>{place.name}</p>
+                                          {subMeta && (<span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded flex-shrink-0" style={{ background: cat.soft, color: cat.color }}>{subMeta.label}</span>)}
+                                        </div>
+                                        {place.notes && (<p className="text-[12px] truncate mt-0.5" style={{ color: "#5C4530" }}>{place.notes}</p>)}
+                                        <p className="text-[10px] mt-0.5 font-mono" style={{ color: "#7A6B58" }}>{timeAgo(place.createdAt)} · {place.lat.toFixed(3)}, {place.lng.toFixed(3)}</p>
+                                      </div>
+                                    </motion.button>
+                                    <motion.button onClick={(e) => { e.stopPropagation(); sharePlace(place); }} whileTap={{ scale: 0.9 }} className="w-10 h-10 mr-2 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: "rgba(232, 99, 45, 0.12)", color: "#C44818" }} aria-label="Share place">
+                                      <Send size={14} strokeWidth={2.4} />
+                                    </motion.button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))
                 )}
               </div>
             </motion.div>
@@ -1144,6 +1245,17 @@ ${JSON.stringify(ctx, null, 2)}`;
                     <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5" style={{ background: CATEGORIES[getCategoryKey(selectedPlace)].soft, color: CATEGORIES[getCategoryKey(selectedPlace)].color }}>
                       <span>{CATEGORIES[getCategoryKey(selectedPlace)].emoji}</span>{CATEGORIES[getCategoryKey(selectedPlace)].label}
                     </span>
+                    {(() => {
+                      const subMeta = getSubtypeMeta(getCategoryKey(selectedPlace), selectedPlace.subtype);
+                      if (!subMeta) return null;
+                      const cat = CATEGORIES[getCategoryKey(selectedPlace)];
+                      return (
+                        <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5" style={{ background: cat.soft, color: cat.color, opacity: 0.85 }}>
+                          <span>{subMeta.emoji}</span>{subMeta.label}
+                        </span>
+                      );
+                    })()}
+                    {selectedPlace.region && (<span className="text-[11px] font-semibold" style={{ color: "#5C4530" }}>{selectedPlace.region}</span>)}
                     {userLocation && (<span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "#7A6B58" }}>{formatDistance(haversineMiles(userLocation.lat, userLocation.lng, selectedPlace.lat, selectedPlace.lng))} away</span>)}
                     <span className="text-[11px]" style={{ color: "#7A6B58" }}>{timeAgo(selectedPlace.createdAt)}</span>
                   </div>
