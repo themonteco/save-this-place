@@ -34,14 +34,21 @@ export async function signOut() {
 }
 
 export async function getCurrentUser() {
-  const { data } = await supabase.auth.getUser();
-  if (!data?.user) return null;
-  const { data: profile } = await supabase.from('profiles').select('name').eq('id', data.user.id).maybeSingle();
+  // Use getSession (reads from local storage, instant) instead of getUser
+  // (which makes a network call that can hang on iOS PWAs and stall startup).
+  const { data } = await supabase.auth.getSession();
+  const user = data?.session?.user;
+  if (!user) return null;
+  let name = user.email ? user.email.split('@')[0] : 'friend';
+  try {
+    const { data: profile } = await supabase.from('profiles').select('name').eq('id', user.id).maybeSingle();
+    if (profile?.name) name = profile.name;
+  } catch (e) { /* profile lookup is best-effort; never block startup on it */ }
   return {
-    id: data.user.id,
-    email: data.user.email,
-    name: profile?.name || data.user.email.split('@')[0],
-    createdAt: data.user.created_at
+    id: user.id,
+    email: user.email,
+    name,
+    createdAt: user.created_at
   };
 }
 
