@@ -8,7 +8,15 @@ if (!url || !anonKey) {
 }
 
 export const supabase = createClient(url || '', anonKey || '', {
-  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false }
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: false,
+    // iOS home-screen PWAs deadlock on the default navigator.locks-based
+    // auth lock, which freezes the app on the loading screen. Replace it
+    // with a no-op lock that just runs the work directly.
+    lock: async (_name, _acquireTimeout, fn) => await fn(),
+  }
 });
 
 // ============ AUTH ============
@@ -33,17 +41,34 @@ export async function signOut() {
   if (error) throw error;
 }
 
+// Race any promise against a timeout so a stalled call can never hang the app.
+// On iOS PWAs the supabase-js startup routine can occasionally stall forever,
+// which used to leave the app stuck on the loading screen.
+function withTimeout(promise, ms, fallback) {
+  return Promise.race([
+    Promise.resolve(promise).catch(() => fallback),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 export async function getCurrentUser() {
-  // Use getSession (reads from local storage, instant) instead of getUser
-  // (which makes a network call that can hang on iOS PWAs and stall startup).
-  const { data } = await supabase.auth.getSession();
-  const user = data?.session?.user;
+  // getSession reads the saved login from local storage. Wrap it in a hard
+  // timeout so startup always finishes, even if the library stalls.
+  const sessionResult = await withTimeout(
+    supabase.auth.getSession(),
+    2500,
+    { data: { session: null } }
+  );
+  const user = sessionResult?.data?.session?.user;
   if (!user) return null;
   let name = user.email ? user.email.split('@')[0] : 'friend';
-  try {
-    const { data: profile } = await supabase.from('profiles').select('name').eq('id', user.id).maybeSingle();
-    if (profile?.name) name = profile.name;
-  } catch (e) { /* profile lookup is best-effort; never block startup on it */ }
+  // Profile name is best-effort and also time-limited; never block startup on it.
+  const profileResult = await withTimeout(
+    supabase.from('profiles').select('name').eq('id', user.id).maybeSingle(),
+    2500,
+    { data: null }
+  );
+  if (profileResult?.data?.name) name = profileResult.data.name;
   return {
     id: user.id,
     email: user.email,
