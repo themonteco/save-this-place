@@ -60,6 +60,8 @@ function rowToPlace(row) {
     accuracy: row.accuracy,
     category: row.category,
     categoryOverride: row.category_override,
+    region: row.region || null,
+    subtype: row.subtype || null,
     hasPhoto: !!row.photo,
     photo: row.photo,
     createdAt: new Date(row.created_at).getTime()
@@ -75,7 +77,7 @@ export async function fetchPlaces() {
   return (data || []).map(rowToPlace);
 }
 
-export async function createPlace({ name, notes, lat, lng, accuracy, category, categoryOverride, photo }) {
+export async function createPlace({ name, notes, lat, lng, accuracy, category, categoryOverride, photo, region, subtype }) {
   const userId = (await supabase.auth.getUser()).data.user?.id;
   if (!userId) throw new Error('Not signed in');
   const { data, error } = await supabase
@@ -84,6 +86,8 @@ export async function createPlace({ name, notes, lat, lng, accuracy, category, c
       user_id: userId,
       name, notes: notes || '', lat, lng, accuracy,
       category, category_override: categoryOverride || null,
+      region: region || null,
+      subtype: subtype || null,
       photo: photo || null
     })
     .select()
@@ -92,11 +96,12 @@ export async function createPlace({ name, notes, lat, lng, accuracy, category, c
   return rowToPlace(data);
 }
 
-export async function updatePlace(id, { name, notes, categoryOverride, photo }) {
+export async function updatePlace(id, { name, notes, categoryOverride, subtype, photo }) {
   const patch = { updated_at: new Date().toISOString() };
   if (name !== undefined) patch.name = name;
   if (notes !== undefined) patch.notes = notes;
   if (categoryOverride !== undefined) patch.category_override = categoryOverride;
+  if (subtype !== undefined) patch.subtype = subtype;
   if (photo !== undefined) patch.photo = photo;
   const { data, error } = await supabase
     .from('places')
@@ -111,6 +116,25 @@ export async function updatePlace(id, { name, notes, categoryOverride, photo }) 
 export async function deletePlace(id) {
   const { error } = await supabase.from('places').delete().eq('id', id);
   if (error) throw error;
+}
+
+// ============ REVERSE GEOCODING (free, via OpenStreetMap Nominatim) ============
+export async function reverseGeocode(lat, lng) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=10&accept-language=en`;
+    const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data.address || {};
+    const state = a.state || a.region || a.province || a['state_district'] || null;
+    const country = a.country || null;
+    if (state && country) return `${state}, ${country}`;
+    if (country) return country;
+    return null;
+  } catch (e) {
+    console.warn("reverseGeocode failed:", e);
+    return null;
+  }
 }
 
 // ============ ASK (calls our serverless function) ============
